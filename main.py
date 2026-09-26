@@ -4,9 +4,12 @@ import time
 import random
 import logging
 import hashlib
+import argparse
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 import requests
 import urllib.parse
 from push import push
@@ -99,7 +102,7 @@ def refresh_cookie(strict=True):
     logging.warning("启动时未获取到新密钥，保留现有 cookie 继续尝试阅读。")
     return False
 
-def read_with_retry(payload, check_limits):
+def read_with_retry(payload, check_limits, retries):
     for attempt in range(len(REQUEST_RETRY_DELAYS) + 1):
         check_limits()
         try:
@@ -124,11 +127,12 @@ def read_with_retry(payload, check_limits):
                     f"阅读请求连续 {attempt + 1} 次失败（{type(exc).__name__}），等待补跑。"
                 ) from exc
             delay = REQUEST_RETRY_DELAYS[attempt]
+            retries["request"] += 1
             logging.warning("阅读请求暂时失败（%s），%d 秒后重试。", type(exc).__name__, delay)
             time.sleep(delay)
 
 
-def run_reading(progress):
+def run_reading(progress, retries):
     if not 1 <= READ_NUM <= 2880:
         raise ValueError("READ_NUM 必须在 1 到 2880 之间。")
     deadline = time.monotonic() + int(os.getenv("WXREAD_MAX_RUNTIME_SECONDS", "7200"))
@@ -165,7 +169,7 @@ def run_reading(progress):
         data['rn'] = random.randint(0, 1000)
         data['sg'] = hashlib.sha256(f"{data['ts']}{data['rn']}{KEY}".encode()).hexdigest()
         data['s'] = cal_hash(encode_data(data))
-        result = read_with_retry(data, check_limits)
+        result = read_with_retry(data, check_limits, retries)
 
         if result.get('succ') == 1 and result.get('synckey') is not None:
             # Commit before sleeping or notifying, so a later failure preserves progress.
@@ -179,6 +183,7 @@ def run_reading(progress):
             if synckey_repairs > SYNCKEY_REPAIR_LIMIT:
                 raise RuntimeError("synckey 连续修复失败，保留进度等待补跑。")
             logging.warning("无 synckey，尝试修复（%d/%d）。", synckey_repairs, SYNCKEY_REPAIR_LIMIT)
+            retries["synckey"] += 1
             try:
                 fix_no_synckey()
             except requests.RequestException as exc:
@@ -189,6 +194,7 @@ def run_reading(progress):
             if cookie_refreshes > COOKIE_REFRESH_LIMIT:
                 raise RuntimeError("连续刷新 Cookie 后阅读仍未成功，请检查登录状态或接口变化。")
             logging.warning("阅读未成功，尝试刷新 Cookie（%d/%d）。", cookie_refreshes, COOKIE_REFRESH_LIMIT)
+            retries["cookie"] += 1
             refresh_cookie()
             time.sleep(5)
     return "completed"
@@ -206,43 +212,127 @@ def summary(text):
             handle.write(text + "\n\n")
 
 
-def notify_result(result=None):
-    if result is None:
-        path = result_path()
-        if path and path.exists():
-            result = json.loads(path.read_text(encoding="utf-8"))
-        else:
-            result = {"status": "failed", "date": beijing_day(), "completed": None,
-                      "error": "任务在完成结果记录前中断，或当天进度恢复失败，请查看 Actions 日志。"}
-    if result["status"] == "skipped":
-        summary("通知：当天已完成，本次跳过，不重复推送。")
-        return 0
+def task_label():
+    return {
+        "7 4 * * *": "12:07 主任务",
+        "17 8 * * *": "16:17 补跑",
+        "27 10 * * *": "18:27 兜底",
+    }.get(os.getenv("WXREAD_SCHEDULE"), "手动任务")
+
+
+def run_link():
+    if os.getenv("GITHUB_RUN_ID"):
+        return f"\n{os.getenv('GITHUB_SERVER_URL', 'https://github.com')}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+    return ""
+
+
+def send_notice(content, success=True):
     if not PUSH_METHOD:
         summary("通知：未配置推送渠道。")
         return 0
-    completed = result.get("completed")
-    minutes = f"{completed * 0.5:.1f}" if completed is not None else "未知"
-    success = result["status"] == "completed"
-    content = (f"微信读书：{'已完成' if success else '本次未完成'}\n"
-               f"北京时间日期：{result['date']}\n已确认阅读：{minutes}/{READ_NUM * 0.5:.1f} 分钟。")
-    if not success:
-        content += "\n" + result["error"]
-        content += "\n补跑检查时间：16:17、18:27；若今天已无剩余时段，请及时手动检查。"
-    if os.getenv("GITHUB_RUN_ID"):
-        content += f"\n{os.getenv('GITHUB_SERVER_URL', 'https://github.com')}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
-    delivered = push(content, PUSH_METHOD, is_success=success)
-    summary("通知：推送服务已接收请求。" if delivered else "通知：推送失败，阅读进度仍独立保留。")
-    if not delivered:
-        logging.error("推送失败；阅读进度已独立保存，不会因通知失败从头重读。")
+    try:
+        delivered = push(content + run_link(), PUSH_METHOD, is_success=success)
+    except Exception as exc:
+        logging.error("通知异常（%s），不修改阅读进度。", type(exc).__name__)
+        delivered = False
+    summary("通知：推送服务已接收请求。" if delivered else "通知：推送失败，阅读进度不受影响。")
     return 0 if delivered else 1
+
+
+def notify_start():
+    progress = DailyProgress(os.getenv("WXREAD_STATE_FILE"), os.getenv("WXREAD_DATE"))
+    if progress.day != beijing_day() or progress.completed >= READ_NUM:
+        return 0  # The result notification will report the skipped check.
+    return send_notice(
+        f"⏳ {task_label()}开始\n今日 {progress.completed * 0.5:g}/{READ_NUM * 0.5:g} 分钟，"
+        f"还需 {(READ_NUM - progress.completed) * 0.5:g} 分钟。"
+    )
+
+
+def next_check(day):
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    if now.date().isoformat() != day:
+        return None
+    for clock in ("12:07", "16:17", "18:27"):
+        if clock > now.strftime("%H:%M"):
+            return clock
+    return None
+
+
+def notify_result(result=None):
+    if result is None:
+        path = result_path()
+        try:
+            result = json.loads(path.read_text(encoding="utf-8")) if path else None
+        except (ValueError, OSError):
+            result = None
+        if not isinstance(result, dict):
+            result = {"status": "failed", "date": os.getenv("WXREAD_DATE") or beijing_day(), "completed": None,
+                      "error": "任务在完成结果记录前中断，或当天进度恢复失败，请查看 Actions 日志。"}
+    completed = result.get("completed")
+    minutes = f"{completed * 0.5:g}" if completed is not None else "未知"
+    amount = f"今日 {minutes}/{READ_NUM * 0.5:g} 分钟"
+    success = result["status"] in ("completed", "skipped")
+    if result["status"] == "skipped":
+        content = f"✅ 已完成，跳过本次检查｜{amount}"
+    elif success:
+        content = f"✅ 今日已完成｜{minutes}/{READ_NUM * 0.5:g} 分钟"
+    else:
+        following = next_check(result["date"])
+        final_attempt = os.getenv("WXREAD_SCHEDULE") == "27 10 * * *" or not following
+        content = f"{'🔴 兜底未完成，需要处理' if final_attempt else '🟡 本次未完成，等待补跑'}｜{amount}"
+        content += "\n" + result["error"]
+        if not final_attempt:
+            content += f"\n下次计划检查：{following}。"
+    content += f"\n{result['date']} · {task_label()}"
+    retries = result.get("retries", {})
+    recovered = [f"{label} {retries[key]} 次" for key, label in
+                 (("request", "请求重试"), ("cookie", "登录刷新"), ("synckey", "同步修复"))
+                 if retries.get(key)]
+    if recovered:
+        content += "\n本次恢复尝试：" + "，".join(recovered)
+    if os.getenv("WXREAD_CHECKPOINT_OUTCOME") == "failure":
+        content = "🔴 进度保存失败，请检查\n" + content
+        success = False
+    return send_notice(content, success)
+
+
+def notify_test():
+    if str(PUSH_METHOD).strip().lower() != "telegram":
+        raise RuntimeError("请将 PUSH_METHOD 配置为 telegram 后再验证。")
+    return send_notice(
+        "✅ 微信读书 TG 通知测试\n已启用完成、失败、补跑和晚间核对提醒。\n这是一条通知测试，不代表实际阅读结果。"
+    )
+
+
+def notify_daily():
+    day = os.getenv("WXREAD_DATE") or beijing_day()
+    path = os.getenv("WXREAD_STATE_FILE")
+    if os.getenv("WXREAD_RESTORE_OUTCOME") != "success" or not path or not Path(path).exists():
+        send_notice(f"🔴 晚间核对失败｜{day}\n完成状态未知，请检查任务。", False)
+        return 1
+    try:
+        progress = DailyProgress(path, day)
+    except (ValueError, OSError, TypeError):
+        send_notice(f"🔴 晚间核对失败｜{day}\n进度数据异常，请检查任务。", False)
+        return 1
+    complete = progress.completed >= READ_NUM
+    if complete:
+        content = f"✅ 晚间核对正常｜{day}\n已完成 {progress.completed * 0.5:g}/{READ_NUM * 0.5:g} 分钟。"
+    else:
+        content = (f"🔴 晚间尚未确认完成｜{day}\n"
+                   f"已保存 {progress.completed * 0.5:g}/{READ_NUM * 0.5:g} 分钟，请检查并及时补跑。")
+    notification_code = send_notice(content, complete)
+    return notification_code if complete else 1
 
 
 def main():
     progress = None
-    result = {"date": os.getenv("WXREAD_DATE") or beijing_day(), "status": "failed", "completed": None}
+    result = {"date": os.getenv("WXREAD_DATE") or beijing_day(), "status": "failed", "completed": None,
+              "retries": {"request": 0, "cookie": 0, "synckey": 0}}
     try:
         progress = DailyProgress(os.getenv("WXREAD_STATE_FILE"), result["date"])
-        result["status"] = run_reading(progress)
+        result["status"] = run_reading(progress, result["retries"])
     except Exception as exc:
         result["error"] = str(exc) if isinstance(exc, (RuntimeError, ValueError)) else f"运行异常：{type(exc).__name__}"
         logging.error("%s", result["error"])
@@ -261,4 +351,16 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(notify_result() if sys.argv[1:] == ["--notify"] else main())
+    parser = argparse.ArgumentParser()
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--notify", action="store_true")
+    mode.add_argument("--notify-start", action="store_true")
+    mode.add_argument("--notify-test", action="store_true")
+    mode.add_argument("--notify-daily", action="store_true")
+    args = parser.parse_args()
+    handler = main
+    for enabled, candidate in ((args.notify, notify_result), (args.notify_start, notify_start),
+                               (args.notify_test, notify_test), (args.notify_daily, notify_daily)):
+        if enabled:
+            handler = candidate
+    sys.exit(handler())

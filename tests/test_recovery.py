@@ -40,6 +40,9 @@ class ReadingRecoveryTests(unittest.TestCase):
             "WXREAD_DATE": progress.beijing_day(),
             "WXREAD_DEFER_NOTIFICATION": "1",
             "WXREAD_MAX_RUNTIME_SECONDS": "7200",
+            "WXREAD_SCHEDULE": "",
+            "WXREAD_CHECKPOINT_OUTCOME": "",
+            "WXREAD_RESTORE_OUTCOME": "success",
             "GITHUB_STEP_SUMMARY": str(Path(self.directory.name) / "summary.md"),
         })
         self.environment.start()
@@ -167,8 +170,136 @@ class ReadingRecoveryTests(unittest.TestCase):
         module = self.module()
         self.assertEqual(module.main(), 0)
         self.assertEqual(module.notify_result(), 0)
-        module.push.assert_not_called()
+        module.push.assert_called_once()
+        self.assertIn("✅ 已完成，跳过本次检查", module.push.call_args.args[0])
         self.assertEqual(module.read_calls, [])
+
+    def test_start_notice_reports_remaining_target_without_reading(self):
+        self.seed(60)
+        module = self.module(target=180)
+        with patch.dict(os.environ, {"WXREAD_SCHEDULE": "17 8 * * *"}):
+            self.assertEqual(module.notify_start(), 0)
+        content = module.push.call_args.args[0]
+        self.assertIn("⏳ 16:17 补跑开始", content)
+        self.assertIn("今日 30/90 分钟，还需 60 分钟", content)
+        self.assertEqual((module.read_calls, module.renewals, self.count()), ([], [], 60))
+
+    def test_completed_day_does_not_send_misleading_start(self):
+        self.seed(2)
+        module = self.module()
+        self.assertEqual(module.notify_start(), 0)
+        module.push.assert_not_called()
+
+    def test_recovery_events_are_summarized_in_final_notice(self):
+        module = self.module([
+            requests.ConnectionError("synthetic"), {"succ": 0}, {"succ": 1},
+        ])
+        self.assertEqual(module.main(), 0)
+        module.push.assert_not_called()
+        self.assertEqual(module.notify_result(), 0)
+        content = module.push.call_args.args[0]
+        self.assertTrue(content.startswith("✅ 今日已完成"))
+        for event in ("请求重试 1 次", "登录刷新 1 次", "同步修复 1 次"):
+            self.assertIn(event, content)
+        self.assertEqual(self.count(), 2)
+
+    def test_failed_run_identifies_pending_recovery_or_final_alert(self):
+        module = self.module(target=180)
+        result = {"status": "failed", "date": progress.beijing_day(), "completed": 60,
+                  "error": "synthetic failure"}
+        cases = (("12:30", "7 4 * * *", "🟡", "16:17"),
+                 ("17:00", "17 8 * * *", "🟡", "18:27"),
+                 ("19:00", "27 10 * * *", "🔴", None))
+        for time_of_day, schedule, color, following in cases:
+            with self.subTest(time=time_of_day), patch.object(module, "datetime") as clock, \
+                    patch.dict(os.environ, {"WXREAD_SCHEDULE": schedule}):
+                clock.now.return_value = datetime.fromisoformat(f"{result['date']}T{time_of_day}:00+08:00")
+                self.assertEqual(module.notify_result(result), 0)
+            content = module.push.call_args.args[0]
+            self.assertTrue(content.startswith(color))
+            self.assertIn("今日 30/90 分钟", content)
+            self.assertFalse(module.push.call_args.kwargs["is_success"])
+            if following:
+                self.assertIn(f"下次计划检查：{following}", content)
+            else:
+                self.assertNotIn("下次计划检查", content)
+
+    def test_checkpoint_upload_failure_is_red_even_after_completed_reading(self):
+        module = self.module()
+        self.assertEqual(module.main(), 0)
+        with patch.dict(os.environ, {"WXREAD_CHECKPOINT_OUTCOME": "failure"}):
+            self.assertEqual(module.notify_result(), 0)
+        self.assertTrue(module.push.call_args.args[0].startswith("🔴 进度保存失败"))
+        self.assertFalse(module.push.call_args.kwargs["is_success"])
+        self.assertEqual(self.count(), 2)
+
+    def test_interrupted_or_corrupt_result_still_sends_an_alert(self):
+        module = self.module()
+        for corrupt in (False, True):
+            with self.subTest(corrupt=corrupt), patch.object(module, "next_check", return_value=None):
+                if corrupt:
+                    module.result_path().write_text("invalid json")
+                self.assertEqual(module.notify_result(), 0)
+                content = module.push.call_args.args[0]
+                self.assertTrue(content.startswith("🔴"))
+                self.assertIn("未知", content)
+                self.assertFalse(module.push.call_args.kwargs["is_success"])
+        self.assertEqual(module.read_calls, [])
+
+    def test_nightly_audit_accepts_only_confirmed_complete_progress(self):
+        module = self.module(target=180)
+        for count, status, color in ((0, 1, "🔴"), (60, 1, "🔴"), (180, 0, "✅")):
+            with self.subTest(count=count):
+                self.seed(count)
+                self.assertEqual(module.notify_daily(), status)
+                content = module.push.call_args.args[0]
+                self.assertTrue(content.startswith(color))
+                self.assertIn(f"{count * 0.5:g}/90 分钟", content)
+                self.assertEqual(module.push.call_args.kwargs["is_success"], status == 0)
+                self.assertEqual(self.count(), count)
+        self.assertEqual((module.read_calls, module.renewals), ([], []))
+
+    def test_nightly_audit_alerts_when_no_run_saved_progress(self):
+        module = self.module()
+        with patch.object(progress, "github_api", return_value=b'{"artifacts": []}'):
+            progress.restore_progress(self.state, progress.beijing_day(), "example/wxread")
+        self.assertEqual(module.notify_daily(), 1)
+        self.assertTrue(module.push.call_args.args[0].startswith("🔴 晚间尚未确认完成"))
+        self.assertEqual(module.read_calls, [])
+
+    def test_nightly_audit_does_not_trust_unreadable_or_unrestored_state(self):
+        module = self.module()
+        self.assertEqual(module.notify_daily(), 1)  # File is missing.
+        self.seed(2)
+        with patch.dict(os.environ, {"WXREAD_RESTORE_OUTCOME": "failure"}):
+            self.assertEqual(module.notify_daily(), 1)
+            self.assertIn("完成状态未知", module.push.call_args.args[0])
+        self.state.write_text("invalid json")
+        self.assertEqual(module.notify_daily(), 1)
+        self.assertIn("进度数据异常", module.push.call_args.args[0])
+        for call in module.push.call_args_list:
+            self.assertTrue(call.args[0].startswith("🔴"))
+            self.assertFalse(call.kwargs["is_success"])
+
+    def test_nightly_audit_delivery_failure_fails_without_changing_progress(self):
+        self.seed(2)
+        module = self.module()
+        module.push.side_effect = RuntimeError("synthetic")
+        self.assertEqual(module.notify_daily(), 1)
+        self.assertEqual(self.count(), 2)
+        self.assertEqual(module.read_calls, [])
+
+    def test_telegram_test_is_labeled_and_never_reads(self):
+        self.seed(1)
+        module = self.module()
+        with self.assertRaises(RuntimeError):
+            module.notify_test()
+        module.push.assert_not_called()
+        module.PUSH_METHOD = "telegram"
+        self.assertEqual(module.notify_test(), 0)
+        module.push.assert_called_once()
+        self.assertIn("不代表实际阅读结果", module.push.call_args.args[0])
+        self.assertEqual((module.read_calls, module.renewals, self.count()), ([], [], 1))
 
     def test_day_rollover_stops_before_network(self):
         self.seed(1)
@@ -283,6 +414,17 @@ class ProgressRestoreTests(unittest.TestCase):
             with self.subTest(count=count), self.assertRaises(ValueError):
                 progress.validate_progress({"schema": 1, "date": self.day, "completed": count}, self.day)
 
+    def test_delayed_nightly_audit_checks_the_intended_beijing_day(self):
+        for timestamp, expected in (
+            ("2026-09-27T13:07:00+00:00", "2026-09-27"),
+            ("2026-09-27T15:59:59+00:00", "2026-09-27"),
+            ("2026-09-27T16:01:00+00:00", "2026-09-27"),
+            ("2026-09-28T13:06:59+00:00", "2026-09-27"),
+            ("2026-09-28T13:07:00+00:00", "2026-09-28"),
+        ):
+            with self.subTest(timestamp=timestamp):
+                self.assertEqual(progress.audit_day(datetime.fromisoformat(timestamp)), expected)
+
 
 class WorkflowTests(unittest.TestCase):
     def test_schedule_and_checkpoint_order(self):
@@ -301,6 +443,23 @@ class WorkflowTests(unittest.TestCase):
         save = steps[names.index("Save today's reading progress")]
         self.assertIn("always()", save["if"])
         self.assertEqual(save["with"]["path"], "run-state/progress.json")
+        start = steps[names.index("Notify reading start")]
+        self.assertEqual(start["continue-on-error"], "true")
+        self.assertLess(names.index("Notify reading start"), names.index("Read remaining daily target"))
+
+    def test_nightly_audit_and_telegram_test_cannot_start_reading(self):
+        audit = yaml.load((ROOT / ".github/workflows/audit.yml").read_text(), Loader=yaml.BaseLoader)
+        self.assertEqual(audit["on"]["schedule"], [{"cron": "7 13 * * *"}])
+        steps = audit["jobs"]["audit"]["steps"]
+        self.assertEqual(steps[-2]["run"], "python progress.py --audit")
+        self.assertEqual(steps[-1]["run"], "python main.py --notify-daily")
+        self.assertIn("always()", steps[-1]["if"])
+        verify = yaml.load((ROOT / ".github/workflows/verify.yml").read_text(), Loader=yaml.BaseLoader)
+        test_job = verify["jobs"]["telegram-test"]
+        self.assertIn("inputs.telegram_test", test_job["if"])
+        self.assertEqual(test_job["steps"][-1]["run"], "python main.py --notify-test")
+        for job in (audit["jobs"]["audit"], test_job):
+            self.assertNotIn("WXREAD_CURL_BASH", json.dumps(job))
 
 
 class NotificationTests(unittest.TestCase):

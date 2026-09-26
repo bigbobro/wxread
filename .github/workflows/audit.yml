@@ -1,0 +1,55 @@
+name: Daily reading audit
+
+on:
+  schedule:
+    # 北京时间 21:07，仅核对结果并告警，不执行阅读
+    - cron: '7 13 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-22.04
+    environment: AutoRead
+    timeout-minutes: 15
+    env:
+      READ_NUM: ${{ vars.READ_NUM }}
+      WXREAD_STATE_FILE: run-state/progress.json
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - run: pip install requests==2.32.3 urllib3==2.2.3
+      - name: Check daily progress
+        id: restore
+        timeout-minutes: 10
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python progress.py --audit
+      - name: Notify daily status
+        if: ${{ always() && steps.restore.outcome != 'skipped' }}
+        timeout-minutes: 5
+        env:
+          WXREAD_DATE: ${{ steps.restore.outputs.day }}
+          WXREAD_RESTORE_OUTCOME: ${{ steps.restore.outcome }}
+          PUSH_METHOD: ${{ secrets.PUSH_METHOD }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          WXPUSHER_SPT: ${{ secrets.WXPUSHER_SPT }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SERVERCHAN_SPT: ${{ secrets.SERVERCHAN_SPT }}
+        run: python main.py --notify-daily
+
+  keepalive-job:
+    name: Keepalive Workflow
+    if: ${{ always() }}
+    needs: audit
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - uses: liskin/gh-workflow-keepalive@v1.2.1

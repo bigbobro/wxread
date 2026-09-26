@@ -59,7 +59,8 @@ class PushNotification:
 
     def push_telegram(self, content, bot_token, chat_id):
         url = self.telegram_url.format(bot_token)
-        payload = {"chat_id": chat_id, "text": content}
+        payload = {"chat_id": chat_id, "text": content,
+                   "link_preview_options": {"is_disabled": True}}
 
         try:
             response = requests.post(url, json=payload, proxies=self.proxies, timeout=30)

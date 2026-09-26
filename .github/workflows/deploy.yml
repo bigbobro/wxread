@@ -25,6 +25,7 @@ jobs:
       READ_NUM: ${{ vars.READ_NUM }}
       WXREAD_STATE_FILE: run-state/progress.json
       WXREAD_DEFER_NOTIFICATION: '1'
+      WXREAD_SCHEDULE: ${{ github.event.schedule }}
 
     steps:
 
@@ -53,6 +54,20 @@ jobs:
         GH_TOKEN: ${{ github.token }}
       run: python progress.py
 
+    - name: Notify reading start
+      id: start_notice
+      continue-on-error: true
+      timeout-minutes: 5
+      env:
+        WXREAD_DATE: ${{ steps.restore.outputs.day }}
+        PUSH_METHOD: ${{ secrets.PUSH_METHOD }}
+        PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+        WXPUSHER_SPT: ${{ secrets.WXPUSHER_SPT }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        SERVERCHAN_SPT: ${{ secrets.SERVERCHAN_SPT }}
+      run: python main.py --notify-start
+
     - name: Read remaining daily target
       id: read
       timeout-minutes: 130
@@ -64,6 +79,7 @@ jobs:
 
     # Save before notifying: a failed notification must never erase reading progress.
     - name: Save today's reading progress
+      id: checkpoint
       if: ${{ always() && steps.restore.outcome == 'success' }}
       uses: actions/upload-artifact@v7
       with:
@@ -77,6 +93,8 @@ jobs:
       if: ${{ always() && steps.restore.outcome != 'skipped' }}
       timeout-minutes: 5
       env:
+        WXREAD_DATE: ${{ steps.restore.outputs.day }}
+        WXREAD_CHECKPOINT_OUTCOME: ${{ steps.checkpoint.outcome }}
         PUSH_METHOD: ${{ secrets.PUSH_METHOD }}
         PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
         WXPUSHER_SPT: ${{ secrets.WXPUSHER_SPT }}

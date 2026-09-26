@@ -7,8 +7,14 @@ on:
       - '*.py'
       - 'tests/**'
       - '.github/workflows/deploy.yml'
+      - '.github/workflows/audit.yml'
       - '.github/workflows/verify.yml'
   workflow_dispatch:
+    inputs:
+      telegram_test:
+        description: 'Send one Telegram notification test (no reading)'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -66,3 +72,22 @@ jobs:
           assert expected in downloaded, 'The current run artifact was not restored'
           print('PASS: GitHub artifact restore recovered exactly 2 synthetic readings')
           PY
+
+  telegram-test:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.telegram_test }}
+    needs: verify
+    runs-on: ubuntu-22.04
+    environment: AutoRead
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - run: pip install requests==2.32.3 urllib3==2.2.3
+      - name: Send Telegram notification test
+        env:
+          PUSH_METHOD: ${{ secrets.PUSH_METHOD }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main.py --notify-test

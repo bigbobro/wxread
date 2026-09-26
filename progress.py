@@ -1,11 +1,12 @@
 """Persist confirmed reading counts, without cookies or notification credentials."""
 import io
+import argparse
 import json
 import os
 import subprocess
 import time
 import zipfile
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
@@ -13,6 +14,15 @@ from zoneinfo import ZoneInfo
 
 def beijing_day():
     return datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+
+
+def audit_day(now=None):
+    now = now or datetime.now(ZoneInfo("Asia/Shanghai"))
+    now = now.astimezone(ZoneInfo("Asia/Shanghai"))
+    # A delayed evening audit after midnight must still check the previous day.
+    if now.strftime("%H:%M") < "21:07":
+        now -= timedelta(days=1)
+    return now.date().isoformat()
 
 
 def validate_progress(value, day):
@@ -118,7 +128,10 @@ def restore_progress(path, day, repository, workflow_path=".github/workflows/dep
 
 
 if __name__ == "__main__":
-    day = beijing_day()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--audit", action="store_true")
+    args = parser.parse_args()
+    day = audit_day() if args.audit and os.getenv("GITHUB_EVENT_NAME") == "schedule" else beijing_day()
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
         output.write(f"day={day}\n")
     restored = restore_progress(
