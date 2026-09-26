@@ -10,3 +10,6 @@ logs/
 .env
 .env.local
 .env.*.local
+
+# Local reading checkpoints
+run-state/

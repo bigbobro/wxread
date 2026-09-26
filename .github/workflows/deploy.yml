@@ -2,24 +2,29 @@ name: wxread
 
 concurrency:
   group: ${{ github.workflow }} # 使用工作流名称作为并发组的key
-  cancel-in-progress: true    # 取消任何正在进行的相同并发组的工作流
+  cancel-in-progress: false   # 补跑排队，避免打断正在阅读的任务
 
 on:
   schedule:
     # 午间任务：北京时间每天 12:07（UTC 04:07），避开 GitHub Actions 整点高峰
     - cron: '7 4 * * *'
-    # 早间任务：北京时间每天 05:00（UTC 前一天 21:00）
-    #- cron: '0 21 * * *'
-    # 午间任务：北京时间每天 11:40（UTC 03:40）
-    #- cron: '40 3 * * *'
-    # 晚间任务：北京时间每天 22:00（UTC 14:00）
-    #- cron: '0 14 * * *'
+    # 补跑检查：北京时间 16:17、18:27，当天已完成则跳过
+    - cron: '17 8 * * *'
+    - cron: '27 10 * * *'
   workflow_dispatch:  # 手动触发
 
 jobs:
   deploy:
     runs-on: ubuntu-22.04
     environment: AutoRead  # 指定环境
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      actions: read
+    env:
+      READ_NUM: ${{ vars.READ_NUM }}
+      WXREAD_STATE_FILE: run-state/progress.json
+      WXREAD_DEFER_NOTIFICATION: '1'
 
     steps:
 
@@ -41,19 +46,44 @@ jobs:
         python -m pip install --upgrade pip
         pip install certifi==2024.8.30 charset-normalizer==3.4.0 idna==3.10 requests==2.32.3 urllib3==2.2.3
 
-    - name: Run deployment script
+    - name: Restore today's reading progress
+      id: restore
+      timeout-minutes: 10
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: python progress.py
+
+    - name: Read remaining daily target
+      id: read
+      timeout-minutes: 130
       env:
         WXREAD_CURL_BASH: ${{ secrets.WXREAD_CURL_BASH }}
+        WXREAD_DATE: ${{ steps.restore.outputs.day }}
+        WXREAD_MAX_RUNTIME_SECONDS: '7200'
+      run: python main.py
+
+    # Save before notifying: a failed notification must never erase reading progress.
+    - name: Save today's reading progress
+      if: ${{ always() && steps.restore.outcome == 'success' }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: wxread-progress-${{ steps.restore.outputs.day }}
+        path: run-state/progress.json
+        if-no-files-found: error
+        retention-days: 7
+        overwrite: true
+
+    - name: Notify reading result
+      if: ${{ always() && steps.restore.outcome != 'skipped' }}
+      timeout-minutes: 5
+      env:
         PUSH_METHOD: ${{ secrets.PUSH_METHOD }}
         PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
         WXPUSHER_SPT: ${{ secrets.WXPUSHER_SPT }}
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         SERVERCHAN_SPT:  ${{ secrets.SERVERCHAN_SPT }}
-        READ_NUM: ${{ vars.READ_NUM }}  # 使用 Repository Variables
-
-      run: |
-        python main.py
+      run: python main.py --notify
 
   keepalive-job:
     name: Keepalive Workflow

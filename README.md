@@ -36,7 +36,27 @@
   - `PUSHPLUS_TOKEN` or `WXPUSHER_SPT` or `TELEGRAM_BOT_TOKEN`&`TELEGRAM_CHAT_ID` or `SERVERCHAN_SPT`: 选择推送后填写对应token。
   
 - 在 **Variables** 部分，最下方添加变量：
-  - `READ_NUM`：设定每次阅读的目标次数。
+  - `READ_NUM`：设定每天阅读的目标次数，每次 30 秒；例如 `180` 为每天 90 分钟。
+
+#### 本 fork 的自动补跑
+
+2026-09-27 起，原来每天 12:07 的单次任务增加了当天进度恢复和两次补跑检查，时间均为北京时间：
+
+| 时间 | 行为 |
+| --- | --- |
+| 12:07 | 执行当天阅读任务 |
+| 16:17 | 检查当天进度，只补尚未完成的次数 |
+| 18:27 | 再检查一次；当天达到目标后直接跳过 |
+
+- 沿用现有登录和推送 Secrets，无需新增 Key。主任务、补跑和手动触发共享当天目标，串行执行，后来的任务不取消正在阅读的任务。
+- 每个带有效 `synckey` 的成功响应确认后保存次数；运行结束后，无论阅读成功还是脚本报错，都尝试上传当天进度。进度文件只包含日期、版本和已完成次数，作为 GitHub Actions artifact 保留 7 天，不包含 Cookie、请求内容或推送凭证。
+- 阅读请求遇到暂时性网络错误、HTTP 429/5xx 或无效响应时，最多额外重试 3 次，分别等待 5、15、30 秒。Cookie 连续刷新和 synckey 连续修复各限 3 次。持续失败会保留进度，等待后面的补跑时段。
+- 单次阅读最多运行约 120 分钟，工作流总上限 150 分钟，为上传进度和通知留出时间。跨过北京时间午夜时停止旧日期任务，不把旧日期的进度计入新一天。
+- 先保存阅读进度，再推送结果。通知失败不会把已完成阅读清零，也不会触发整段重读。推送按服务返回的业务结果判断是否接受请求，不把 HTTP 200 一律当成成功；通知仍以接收端实际收到为准。失败通知包含已确认的分钟数、原因和 Actions 链接；当天已完成的补跑不重复推送。
+- GitHub 调度本身仍可能延迟或漏触发。进度 API 不可读或数据损坏时会停止本次阅读，避免把未知进度当成零。Runner 被强制终止、进度上传失败、或服务端已处理请求但响应丢失时，不能保证所有次数都被准确恢复，也不能保证完全不重复计时。
+- 进度代表脚本收到确认的次数，最终阅读时长和挑战赛结果以微信读书端为准。本地/Docker 运行默认仍每次执行目标次数；仅设置 `WXREAD_STATE_FILE` 后才启用文件续跑。
+
+`Verify recovery` 工作流使用模拟请求测试中断续跑、当天去重、重试上限和日期切换，并通过真实 GitHub artifact 上传/下载检查进度传递；不会读取登录 Secrets 或调用微信读书接口。
 
 
 - 基本释义：
@@ -44,7 +64,7 @@
 | key                        | Value                               | 说明                                                         | 属性      |
 | ------------------------- | ---------------------------------- | ------------------------------------------------------------ | --------- |
 | `WXREAD_CURL_BASH`         | `read` 接口 `curl_bash`数据 | **必填**，必须提供有效指令                                   | secrets   |
-| `READ_NUM`                 | 阅读次数（每次 30 秒）              | **可选**，阅读时长，默认 20 分钟                           | variables |
+| `READ_NUM`                 | 每天的目标次数（每次 30 秒）         | **可选**，默认 40 次/20 分钟；补跑只完成剩余次数             | variables |
 | `PUSH_METHOD`              | `pushplus`/`wxpusher`/`telegram`/`serverchan`    | **可选**，推送方式，4选1，默认不推送                                       |    secrets     |
 | `PUSHPLUS_TOKEN`           | PushPlus 的 token                   | 当 `PUSH_METHOD=pushplus` 时必填，[获取地址](https://www.pushplus.plus/uc.html) | secrets   |
 | `WXPUSHER_SPT`             | WxPusher 的token                    | 当 `PUSH_METHOD=wxpusher` 时必填，[获取地址](https://wxpusher.zjiecode.com/docs/#/?id=获取spt) | secrets   |
@@ -156,5 +176,3 @@ docker-compose exec wxread python /app/main.py
 | `ps` | `"xxxxxxxxxxxxxxxxxxxxxxxx"` | 用户标识符或会话标识符，用于追踪用户或会话。 |
 | `pc` | `"xxxxxxxxxxxxxxxxxxxxxxxx"` | 设备标识符或客户端标识符，用于标识用户的设备或客户端。 |
 | `s` | `"fadcb9de"` | 校验和或哈希值，用于验证请求数据的完整性。 |
-
-

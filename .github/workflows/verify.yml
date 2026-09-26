@@ -1,0 +1,68 @@
+name: Verify recovery
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '*.py'
+      - 'tests/**'
+      - '.github/workflows/deploy.yml'
+      - '.github/workflows/verify.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Install test dependencies
+        run: pip install requests==2.32.3 urllib3==2.2.3 PyYAML==6.0.3
+      - name: Check reading recovery without live requests
+        run: python -m unittest discover -s tests -v
+      - name: Create synthetic progress
+        run: |
+          python - <<'PY'
+          from progress import DailyProgress
+          state = DailyProgress('artifact-test/progress.json', '2000-01-01')
+          state.completed = 2
+          state.save()
+          PY
+      - name: Upload synthetic progress
+        id: checkpoint
+        uses: actions/upload-artifact@v7
+        with:
+          name: wxread-progress-2000-01-01
+          path: artifact-test/progress.json
+          retention-days: 1
+          overwrite: true
+      - name: Verify progress through the GitHub artifact API
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TEST_ARTIFACT_ID: ${{ steps.checkpoint.outputs.artifact-id }}
+        run: |
+          python - <<'PY'
+          import os
+          import progress
+          api = progress.github_api
+          downloaded = []
+          def tracked_api(endpoint):
+              downloaded.append(endpoint)
+              return api(endpoint)
+          progress.github_api = tracked_api
+          state = progress.restore_progress(
+              'artifact-test/restored.json', '2000-01-01',
+              os.environ['GITHUB_REPOSITORY'], '.github/workflows/verify.yml',
+          )
+          assert state.completed == 2, state.completed
+          expected = f"repos/{os.environ['GITHUB_REPOSITORY']}/actions/artifacts/{os.environ['TEST_ARTIFACT_ID']}/zip"
+          assert expected in downloaded, 'The current run artifact was not restored'
+          print('PASS: GitHub artifact restore recovered exactly 2 synthetic readings')
+          PY
