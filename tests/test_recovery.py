@@ -177,10 +177,10 @@ class ReadingRecoveryTests(unittest.TestCase):
     def test_start_notice_reports_remaining_target_without_reading(self):
         self.seed(60)
         module = self.module(target=180)
-        with patch.dict(os.environ, {"WXREAD_SCHEDULE": "17 8 * * *"}):
+        with patch.dict(os.environ, {"WXREAD_SCHEDULE": "17 0 * * *"}):
             self.assertEqual(module.notify_start(), 0)
         content = module.push.call_args.args[0]
-        self.assertIn("⏳ 16:17 补跑开始", content)
+        self.assertIn("⏳ 08:17 补跑开始", content)
         self.assertIn("今日 30/90 分钟，还需 60 分钟", content)
         self.assertEqual((module.read_calls, module.renewals, self.count()), ([], [], 60))
 
@@ -207,9 +207,9 @@ class ReadingRecoveryTests(unittest.TestCase):
         module = self.module(target=180)
         result = {"status": "failed", "date": progress.beijing_day(), "completed": 60,
                   "error": "synthetic failure"}
-        cases = (("12:30", "0 4 * * *", "🟡", "16:17"),
-                 ("17:00", "17 8 * * *", "🟡", "18:27"),
-                 ("19:00", "27 10 * * *", "🔴", None))
+        cases = (("03:00", "0 17 * * *", "🟡", "08:17"),
+                 ("10:00", "17 0 * * *", "🟡", "12:27"),
+                 ("14:00", "27 4 * * *", "🔴", None))
         for time_of_day, schedule, color, following in cases:
             with self.subTest(time=time_of_day), patch.object(module, "datetime") as clock, \
                     patch.dict(os.environ, {"WXREAD_SCHEDULE": schedule}):
@@ -416,11 +416,11 @@ class ProgressRestoreTests(unittest.TestCase):
 
     def test_delayed_nightly_audit_checks_the_intended_beijing_day(self):
         for timestamp, expected in (
-            ("2026-09-27T13:07:00+00:00", "2026-09-27"),
+            ("2026-09-27T09:07:00+00:00", "2026-09-27"),
             ("2026-09-27T15:59:59+00:00", "2026-09-27"),
             ("2026-09-27T16:01:00+00:00", "2026-09-27"),
-            ("2026-09-28T13:06:59+00:00", "2026-09-27"),
-            ("2026-09-28T13:07:00+00:00", "2026-09-28"),
+            ("2026-09-28T09:06:59+00:00", "2026-09-27"),
+            ("2026-09-28T09:07:00+00:00", "2026-09-28"),
         ):
             with self.subTest(timestamp=timestamp):
                 self.assertEqual(progress.audit_day(datetime.fromisoformat(timestamp)), expected)
@@ -435,7 +435,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(daily, ["*", "*", "*"])
             when = datetime(2026, 9, 27, int(hour), int(minute), tzinfo=timezone.utc)
             times.append(when.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%H:%M"))
-        self.assertEqual(times, ["12:00", "16:17", "18:27"])
+        self.assertEqual(times, ["01:00", "08:17", "12:27"])
         self.assertEqual(workflow["concurrency"]["cancel-in-progress"], "false")
         steps = workflow["jobs"]["deploy"]["steps"]
         names = [step["name"] for step in steps]
@@ -449,7 +449,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_nightly_audit_and_telegram_test_cannot_start_reading(self):
         audit = yaml.load((ROOT / ".github/workflows/audit.yml").read_text(), Loader=yaml.BaseLoader)
-        self.assertEqual(audit["on"]["schedule"], [{"cron": "7 13 * * *"}])
+        self.assertEqual(audit["on"]["schedule"], [{"cron": "7 9 * * *"}])
         steps = audit["jobs"]["audit"]["steps"]
         self.assertEqual(steps[-2]["run"], "python progress.py --audit")
         self.assertEqual(steps[-1]["run"], "python main.py --notify-daily")

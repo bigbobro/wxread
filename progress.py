@@ -20,7 +20,7 @@ def audit_day(now=None):
     now = now or datetime.now(ZoneInfo("Asia/Shanghai"))
     now = now.astimezone(ZoneInfo("Asia/Shanghai"))
     # A delayed evening audit after midnight must still check the previous day.
-    if now.strftime("%H:%M") < "21:07":
+    if now.strftime("%H:%M") < "17:07":
         now -= timedelta(days=1)
     return now.date().isoformat()
 

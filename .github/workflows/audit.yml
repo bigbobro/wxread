@@ -2,8 +2,8 @@ name: Daily reading audit
 
 on:
   schedule:
-    # 北京时间 21:07，仅核对结果并告警，不执行阅读
-    - cron: '7 13 * * *'
+    # 北京时间 17:07，仅核对结果并告警，不执行阅读
+    - cron: '7 9 * * *'
   workflow_dispatch:
 
 permissions:

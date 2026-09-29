@@ -214,9 +214,9 @@ def summary(text):
 
 def task_label():
     return {
-        "0 4 * * *": "12:00 主任务",
-        "17 8 * * *": "16:17 补跑",
-        "27 10 * * *": "18:27 兜底",
+        "0 17 * * *": "01:00 主任务",
+        "17 0 * * *": "08:17 补跑",
+        "27 4 * * *": "12:27 兜底",
     }.get(os.getenv("WXREAD_SCHEDULE"), "手动任务")
 
 
@@ -253,7 +253,7 @@ def next_check(day):
     now = datetime.now(ZoneInfo("Asia/Shanghai"))
     if now.date().isoformat() != day:
         return None
-    for clock in ("12:00", "16:17", "18:27"):
+    for clock in ("01:00", "08:17", "12:27"):
         if clock > now.strftime("%H:%M"):
             return clock
     return None
@@ -279,7 +279,7 @@ def notify_result(result=None):
         content = f"✅ 今日已完成｜{minutes}/{READ_NUM * 0.5:g} 分钟"
     else:
         following = next_check(result["date"])
-        final_attempt = os.getenv("WXREAD_SCHEDULE") == "27 10 * * *" or not following
+        final_attempt = os.getenv("WXREAD_SCHEDULE") == "27 4 * * *" or not following
         content = f"{'🔴 兜底未完成，需要处理' if final_attempt else '🟡 本次未完成，等待补跑'}｜{amount}"
         content += "\n" + result["error"]
         if not final_attempt:
