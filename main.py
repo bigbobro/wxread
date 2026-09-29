@@ -214,7 +214,7 @@ def summary(text):
 
 def task_label():
     return {
-        "7 4 * * *": "12:07 主任务",
+        "0 4 * * *": "12:00 主任务",
         "17 8 * * *": "16:17 补跑",
         "27 10 * * *": "18:27 兜底",
     }.get(os.getenv("WXREAD_SCHEDULE"), "手动任务")
@@ -253,7 +253,7 @@ def next_check(day):
     now = datetime.now(ZoneInfo("Asia/Shanghai"))
     if now.date().isoformat() != day:
         return None
-    for clock in ("12:07", "16:17", "18:27"):
+    for clock in ("12:00", "16:17", "18:27"):
         if clock > now.strftime("%H:%M"):
             return clock
     return None

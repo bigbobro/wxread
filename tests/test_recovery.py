@@ -207,7 +207,7 @@ class ReadingRecoveryTests(unittest.TestCase):
         module = self.module(target=180)
         result = {"status": "failed", "date": progress.beijing_day(), "completed": 60,
                   "error": "synthetic failure"}
-        cases = (("12:30", "7 4 * * *", "🟡", "16:17"),
+        cases = (("12:30", "0 4 * * *", "🟡", "16:17"),
                  ("17:00", "17 8 * * *", "🟡", "18:27"),
                  ("19:00", "27 10 * * *", "🔴", None))
         for time_of_day, schedule, color, following in cases:
@@ -435,7 +435,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(daily, ["*", "*", "*"])
             when = datetime(2026, 9, 27, int(hour), int(minute), tzinfo=timezone.utc)
             times.append(when.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%H:%M"))
-        self.assertEqual(times, ["12:07", "16:17", "18:27"])
+        self.assertEqual(times, ["12:00", "16:17", "18:27"])
         self.assertEqual(workflow["concurrency"]["cancel-in-progress"], "false")
         steps = workflow["jobs"]["deploy"]["steps"]
         names = [step["name"] for step in steps]
